@@ -464,8 +464,11 @@ async function fetchGenreTracks(spotifyApi, genres, count) {
     console.log(`🎵 Searching for ${genre} tracks...`);
 
     try {
+      const offset = Math.floor(Math.random() * 5) * 10;
+
       const data = await spotifyApi.searchTracks(`genre:${genre}`, {
         limit: Math.min(perGenre, 10),
+        offset,
         market: "from_token",
       });
 
@@ -525,7 +528,7 @@ async function fetchAllMusicTracks(spotifyApi, config) {
   }
 
   if (musicConfig.shuffle !== false) {
-    shuffle(tracks);
+    tracks = shuffle(tracks);
   }
 
   return tracks;
