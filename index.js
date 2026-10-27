@@ -12,47 +12,65 @@
 //   node index.js --podcast-only  Hourly mode: fresh podcasts, reused music
 // =============================================================================
 
+// --- Node.js built-in modules ---
 const fs = require("fs");
 
-const yaml = require("js-yaml");
-const SpotifyWebApi = require("spotify-web-api-node");
 
-const TOKEN_FILE = ".spotify-token.json";
-const CONFIG_FILE = "config.yaml";
-const STATE_FILE = "state.json";
+// --- Third-party libraries (installed via npm install) ---
+const yaml = require("js-yaml");               // Parses YAML config files
+const SpotifyWebApi = require("spotify-web-api-node"); // Wraps the Spotify Web API
 
-const DRY_RUN = process.argv.includes("--dry-run");
-const PODCAST_ONLY = process.argv.includes("--podcast-only");
+// --- File paths used by the script ---
+const TOKEN_FILE = ".spotify-token.json";  // Stores your Spotify OAuth tokens (created by setup.js)
+const CONFIG_FILE = "config.yaml";         // Your configuration (podcasts, music, schedule, etc.)
+const STATE_FILE = "state.json";           // Caches last run's episode URIs to detect changes
+
+
+// Check command-line flags
+const DRY_RUN = process.argv.includes("--dry-run");       // Shows what would happen without changing the playlist
+const PODCAST_ONLY = process.argv.includes("--podcast-only"); // Hourly mode: only refresh podcasts, reuse saved music
 
 // =============================================================================
 // Helper Functions
 // =============================================================================
 
+/**
+ * Loads and parses config.yaml. Exits with an error if the file doesn't exist.
+ * This file contains your Spotify credentials, podcast list, music preferences, etc.
+ */
 function loadConfig() {
   if (!fs.existsSync(CONFIG_FILE)) {
     console.error("❌ config.yaml not found! Run: cp config.example.yaml config.yaml");
     process.exit(1);
   }
-
   return yaml.load(fs.readFileSync(CONFIG_FILE, "utf8"));
 }
 
+/**
+ * Loads the saved OAuth token from disk. Exits if not found.
+ * The token file is created when you run `npm run setup` for the first time.
+ */
 function loadToken() {
   if (!fs.existsSync(TOKEN_FILE)) {
     console.error("❌ Not authenticated! Run: npm run setup");
     process.exit(1);
   }
-
   return JSON.parse(fs.readFileSync(TOKEN_FILE, "utf8"));
 }
 
+/**
+ * Saves the OAuth token back to disk (called after a token refresh).
+ */
 function saveToken(tokenData) {
   fs.writeFileSync(TOKEN_FILE, JSON.stringify(tokenData, null, 2));
 }
 
+/**
+ * Loads the state file that tracks which episodes were in the last playlist update.
+ * Returns an empty object if the file doesn't exist or is corrupted.
+ */
 function loadState() {
   if (!fs.existsSync(STATE_FILE)) return {};
-
   try {
     return JSON.parse(fs.readFileSync(STATE_FILE, "utf8"));
   } catch {
@@ -60,19 +78,23 @@ function loadState() {
   }
 }
 
+/**
+ * Saves state to disk so the next run can compare episodes and skip if nothing changed.
+ */
 function saveState(state) {
   fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2));
 }
 
 /**
- * Fisher-Yates shuffle. Returns a new shuffled array without mutating the input.
+ * Fisher-Yates shuffle — randomizes an array in-place.
+ * Used to shuffle music tracks so the playlist feels fresh each time.
  */
 function shuffle(array) {
-  const arr = [...array];
+  const arr = [...array]; // Create a copy so we don't modify the original
 
   for (let i = arr.length - 1; i > 0; i--) {
     const j = Math.floor(Math.random() * (i + 1));
-    [arr[i], arr[j]] = [arr[j], arr[i]];
+    [arr[i], arr[j]] = [arr[j], arr[i]]; // Swap elements
   }
 
   return arr;
@@ -120,26 +142,29 @@ function deduplicateTracks(tracks) {
 }
 
 /**
- * Refreshes the Spotify access token when it is close to expiry.
+ * Spotify access tokens expire after 1 hour. This function checks if the token
+ * is about to expire (within 5 minutes) and refreshes it automatically using
+ * the long-lived refresh token. You don't need to re-authenticate manually.
  */
 async function refreshTokenIfNeeded(spotifyApi, token) {
-  if (Date.now() <= token.expires_at - 5 * 60 * 1000) return;
+  if (Date.now() > token.expires_at - 5 * 60 * 1000) {
+    console.log("🔄 Refreshing access token...");
+    const data = await spotifyApi.refreshAccessToken();
 
-  console.log("🔄 Refreshing access token...");
+    // Update the token in memory
+    token.access_token = data.body.access_token;
+    token.expires_at = Date.now() + data.body.expires_in * 1000;
 
-  const data = await spotifyApi.refreshAccessToken();
+    // Spotify sometimes rotates the refresh token too — save it if provided
+    if (data.body.refresh_token) {
+      token.refresh_token = data.body.refresh_token;
+    }
 
-  token.access_token = data.body.access_token;
-  token.expires_at = Date.now() + data.body.expires_in * 1000;
-
-  if (data.body.refresh_token) {
-    token.refresh_token = data.body.refresh_token;
+    // Persist to disk and update the API client
+    saveToken(token);
+    spotifyApi.setAccessToken(token.access_token);
+    console.log("✅ Token refreshed");
   }
-
-  saveToken(token);
-  spotifyApi.setAccessToken(token.access_token);
-
-  console.log("✅ Token refreshed");
 }
 
 /**
