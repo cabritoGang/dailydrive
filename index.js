@@ -142,6 +142,56 @@ async function refreshTokenIfNeeded(spotifyApi, token) {
   console.log("✅ Token refreshed");
 }
 
+/**
+ * Parses "35-35-30" into percentage shares for top tracks, playlists, and genres.
+ */
+function parseSharePattern(pattern, topEnabled, playlistsEnabled, genresEnabled) {
+  const fallback = {
+    top: topEnabled ? 50 : 0,
+    playlists: playlistsEnabled ? 50 : 0,
+    genres: genresEnabled ? 50 : 0,
+  };
+
+  if (!pattern || typeof pattern !== "string") {
+    return normalizeShares(fallback);
+  }
+
+  const parts = pattern.split("-").map((value) => Number(value.trim()));
+
+  if (
+    parts.length !== 3 ||
+    parts.some((value) => !Number.isFinite(value) || value < 0)
+  ) {
+    console.warn(
+      `⚠️ Invalid share_pattern "${pattern}". Expected e.g. "35-35-30". Using fallback.`
+    );
+    return normalizeShares(fallback);
+  }
+
+  return normalizeShares({
+    top: parts[0],
+    playlists: parts[1],
+    genres: parts[2],
+  });
+}
+
+/**
+ * Normalizes shares so they always total 100.
+ */
+function normalizeShares(shares) {
+  const total = shares.top + shares.playlists + shares.genres;
+
+  if (total === 0) {
+    return { top: 100, playlists: 0, genres: 0 };
+  }
+
+  return {
+    top: Math.round((shares.top / total) * 100),
+    playlists: Math.round((shares.playlists / total) * 100),
+    genres: Math.round((shares.genres / total) * 100),
+  };
+}
+
 // =============================================================================
 // Podcast Fetching
 // =============================================================================
@@ -343,61 +393,6 @@ async function fetchEpisodeWithAlternates(spotifyApi, podcast) {
 async function fetchMusicTracks(spotifyApi, musicConfig) {
   let allTracks = [];
 
-  if (musicConfig.playlists) {
-    for (const playlist of musicConfig.playlists) {
-      if (!playlist.id || playlist.id === "your-playlist-id") continue;
-
-      console.log(`🎵 Fetching songs from playlist: ${playlist.name}`);
-
-      try {
-        const accessToken = spotifyApi.getAccessToken();
-        let offset = 0;
-        let hasMore = true;
-
-        while (hasMore) {
-          const response = await fetch(
-            `https://api.spotify.com/v1/playlists/${playlist.id}/items?limit=100&offset=${offset}`,
-            {
-              headers: {
-                Authorization: `Bearer ${accessToken}`,
-              },
-            }
-          );
-
-          if (!response.ok) {
-            throw new Error(`HTTP ${response.status}: ${await response.text()}`);
-          }
-
-          const data = await response.json();
-
-          for (const entry of data.items) {
-            const track = entry.item;
-
-            if (track && track.uri && track.type === "track") {
-              allTracks.push({
-                uri: track.uri,
-                name: track.name,
-                artist:
-                  track.artists?.map((artist) => artist.name).join(", ") ||
-                  "Unknown",
-                type: "track",
-              });
-            }
-          }
-
-          offset += 100;
-          hasMore = offset < data.total;
-        }
-
-        console.log(`    Found ${allTracks.length} tracks so far`);
-      } catch (err) {
-        console.error(
-          `    ⚠️  Failed to fetch playlist ${playlist.name}: ${err.message}`
-        );
-      }
-    }
-  }
-
   if (musicConfig.top_tracks && musicConfig.top_tracks.enabled) {
     const timeRange = musicConfig.top_tracks.time_range || "short_term";
     const count = musicConfig.top_tracks.count || 30;
@@ -453,6 +448,7 @@ async function fetchMusicTracks(spotifyApi, musicConfig) {
   return allTracks;
 }
 
+
 /**
  * Fetches discovery tracks by searching Spotify for each configured genre.
  */
@@ -492,46 +488,141 @@ async function fetchGenreTracks(spotifyApi, genres, count) {
 }
 
 /**
- * Fetches familiar music and discovery music, merges them, removes duplicates,
- * and returns the final music pool.
+ * Fetches tracks from configured Spotify playlists.
+ * Used as its own music source so playlist share can be configured separately.
+ */
+async function fetchPlaylistTracks(spotifyApi, playlists, count) {
+  const tracks = [];
+  const accessToken = spotifyApi.getAccessToken();
+
+  for (const playlist of playlists) {
+    if (!playlist.id || playlist.id === "your-playlist-id") continue;
+
+    console.log(`🎵 Fetching tracks from playlist: ${playlist.name}`);
+
+    try {
+      let offset = 0;
+      let hasMore = true;
+
+      while (hasMore) {
+        const response = await fetch(
+          `https://api.spotify.com/v1/playlists/${playlist.id}/items?limit=100&offset=${offset}`,
+          {
+            headers: {
+              Authorization: `Bearer ${accessToken}`,
+            },
+          }
+        );
+
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}: ${await response.text()}`);
+        }
+
+        const data = await response.json();
+
+        for (const entry of data.items || []) {
+          const track = entry.item;
+
+          if (track && track.uri && track.type === "track") {
+            tracks.push({
+              uri: track.uri,
+              name: track.name,
+              artist:
+                track.artists?.map((artist) => artist.name).join(", ") ||
+                "Unknown",
+              type: "track",
+            });
+          }
+        }
+
+        offset += 100;
+        hasMore = offset < (data.total || 0);
+      }
+
+      console.log(`    Found ${tracks.length} playlist tracks so far`);
+    } catch (err) {
+      console.error(
+        `    ⚠️  Failed to fetch playlist ${playlist.name}: ${err.message}`
+      );
+    }
+  }
+
+  return shuffle(tracks).slice(0, count);
+}
+
+/**
+ * Fetches music from top tracks, configured playlists, and genre discovery.
+ * The relative share of each source is controlled by music.share_pattern.
+ *
+ * share_pattern format: "top-playlists-genres"
+ * Example: "35-35-30" = 35% top tracks, 35% playlist tracks, 30% genre discovery
  */
 async function fetchAllMusicTracks(spotifyApi, config) {
   const musicConfig = config.music || {};
   const totalSongs = musicConfig.total_songs || 15;
-  const hasGenres = musicConfig.genres && musicConfig.genres.length > 0;
 
-  const familiarCount = hasGenres ? Math.ceil(totalSongs / 2) : totalSongs;
-  const discoveryCount = hasGenres ? totalSongs - familiarCount : 0;
+  const shares = parseSharePattern(
+    musicConfig.share_pattern,
+    musicConfig.top_tracks?.enabled,
+    musicConfig.playlists?.length > 0,
+    musicConfig.genres?.length > 0
+  );
 
-  const familiarConfig = { ...musicConfig, total_songs: familiarCount };
-  let tracks = await fetchMusicTracks(spotifyApi, familiarConfig);
+  const topCount = Math.round((totalSongs * shares.top) / 100);
+  const playlistCount = Math.round((totalSongs * shares.playlists) / 100);
+  let genreCount = totalSongs - topCount - playlistCount;
 
-  if (hasGenres && discoveryCount > 0) {
+  if (genreCount < 0) genreCount = 0;
+
+  console.log(
+    `🎵 Music share pattern: ${shares.top}% top tracks, ${shares.playlists}% playlists, ${shares.genres}% genre discovery`
+  );
+  console.log(
+    `🎵 Target counts: ${topCount} top tracks, ${playlistCount} playlist tracks, ${genreCount} genre discovery`
+  );
+
+  let tracks = [];
+
+  if (topCount > 0) {
+    const topConfig = {
+      ...musicConfig,
+      playlists: [],
+      total_songs: topCount,
+    };
+
+    const topTracks = await fetchMusicTracks(spotifyApi, topConfig);
+    tracks.push(...topTracks);
+  }
+
+  if (playlistCount > 0 && musicConfig.playlists?.length > 0) {
+    const playlistTracks = await fetchPlaylistTracks(
+      spotifyApi,
+      musicConfig.playlists,
+      playlistCount
+    );
+
+    tracks.push(...playlistTracks);
+  }
+
+  if (genreCount > 0 && musicConfig.genres?.length > 0) {
     const genreTracks = await fetchGenreTracks(
       spotifyApi,
       musicConfig.genres,
-      discoveryCount
+      genreCount
     );
 
-    const familiarUris = new Set(tracks.map((track) => track.uri));
-    const newGenreTracks = genreTracks.filter(
-      (track) => !familiarUris.has(track.uri)
-    );
-
-    tracks = [...tracks, ...newGenreTracks.slice(0, discoveryCount)];
-
-    tracks = deduplicateTracks(tracks);
-
-    console.log(
-      `🎵 Music mix: ${familiarCount} familiar + ${newGenreTracks.slice(0, discoveryCount).length} discovery = ${tracks.length} total`
-    );
+    tracks.push(...genreTracks);
   }
+
+  tracks = deduplicateTracks(tracks);
+
+  console.log(`🎵 Final mix deduplicated: ${tracks.length} tracks after dedup`);
 
   if (musicConfig.shuffle !== false) {
     tracks = shuffle(tracks);
   }
 
-  return tracks;
+  return tracks.slice(0, totalSongs);
 }
 
 
