@@ -524,8 +524,13 @@ async function fetchAllMusicTracks(spotifyApi, config) {
     );
   }
 
+  if (musicConfig.shuffle !== false) {
+    shuffle(tracks);
+  }
+
   return tracks;
 }
+
 
 // =============================================================================
 // Playlist Mixing and Updating
