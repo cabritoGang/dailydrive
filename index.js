@@ -204,7 +204,7 @@ async function fetchPodcastEpisodes(spotifyApi, podcasts) {
       // Default: newest
       const data = await spotifyApi.getShowEpisodes(podcast.id, {
         limit: count,
-        market: "US",
+        market: "from_token",
       });
 
       for (const episode of data.body.items) {
@@ -244,7 +244,7 @@ async function fetchOldestUnplayedEpisodes(spotifyApi, podcast, count) {
     const data = await spotifyApi.getShowEpisodes(podcast.id, {
       limit,
       offset,
-      market: "US",
+      market: "from_token",
     });
 
     const items = data.body.items;
@@ -279,7 +279,7 @@ async function fetchOldestUnplayedEpisodes(spotifyApi, podcast, count) {
 
     const fallback = await spotifyApi.getShowEpisodes(podcast.id, {
       limit: count,
-      market: "US",
+      market: "from_token",
     });
 
     return fallback.body.items;
@@ -303,7 +303,7 @@ async function fetchEpisodeWithAlternates(spotifyApi, podcast) {
 
     const data = await spotifyApi.getShowEpisodes(show.id, {
       limit: 1,
-      market: "US",
+      market: "from_token",
     });
 
     const newestEpisode = data.body.items[0];
@@ -466,7 +466,7 @@ async function fetchGenreTracks(spotifyApi, genres, count) {
     try {
       const data = await spotifyApi.searchTracks(`genre:${genre}`, {
         limit: Math.min(perGenre, 10),
-        market: "US",
+        market: "from_token",
       });
 
       for (const track of data.body.tracks.items) {
